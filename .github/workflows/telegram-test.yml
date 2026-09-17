@@ -1,0 +1,45 @@
+name: Telegram Notification Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  telegram-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Send test notification to Alena and admin
+        env:
+          CLIENT_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLIENT_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MESSAGE="Bilky for Irakli: Telegram notification test. No Bilky action was performed."
+
+          send_message() {
+            local token="$1"
+            local chat_id="$2"
+            local label="$3"
+
+            response=$(curl -sS -w "\n%{http_code}" \
+              -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"chat_id": sys.argv[1], "text": sys.argv[2]}))' "$chat_id" "$MESSAGE")")
+
+            body=$(printf '%s' "$response" | sed '$d')
+            code=$(printf '%s' "$response" | tail -n1)
+
+            if [ "$code" != "200" ]; then
+              echo "${label} Telegram failed: HTTP ${code} ${body}"
+              exit 1
+            fi
+
+            echo "${label} Telegram OK"
+          }
+
+          send_message "$CLIENT_BOT_TOKEN" "$CLIENT_CHAT_ID" "Alena"
+          send_message "$ADMIN_BOT_TOKEN" "$ADMIN_CHAT_ID" "Admin"

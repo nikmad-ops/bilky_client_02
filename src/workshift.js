@@ -641,6 +641,25 @@ function cloudflareVerificationError() {
   return error;
 }
 
+function isRetryableTransientError(error) {
+  const message =
+    String(error?.message || "");
+
+  return (
+    error?.code ===
+      "CLOUDFLARE_SECURITY_VERIFICATION" ||
+    message.includes(
+      "locator.waitFor: Timeout 15000ms exceeded"
+    ) ||
+    message.includes(
+      "Bilky login fields not found"
+    ) ||
+    message.includes(
+      "Bilky security verification/login did not clear within 25 seconds"
+    )
+  );
+}
+
 async function assertNoSecurityVerification(page) {
   if (
     await securityVerificationDetected(
@@ -828,10 +847,13 @@ async function main() {
       );
 
       if (
-        error.code ===
-          "CLOUDFLARE_SECURITY_VERIFICATION" &&
+        isRetryableTransientError(error) &&
         attempt === 1
       ) {
+        log(
+          "Transient Bilky/Cloudflare page failure detected. Retrying from a completely new Browserless session."
+        );
+
         await waitBeforeCloudflareRetry();
         continue;
       }

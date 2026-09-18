@@ -7,6 +7,14 @@ on:
         description: 'Telegram chat id requesting status'
         required: true
         type: string
+      mode:
+        description: 'status or read-only'
+        required: true
+        default: 'status'
+        type: choice
+        options:
+          - status
+          - read-only
 
 jobs:
   status:
@@ -44,7 +52,7 @@ jobs:
         run: npm install
 
       - name: Read Bilky weekly status
-        if: steps.auth.outputs.allowed == 'true'
+        if: steps.auth.outputs.allowed == 'true' && inputs.mode == 'status'
         env:
           REQUEST_CHAT_ID: ${{ inputs.chat_id }}
           BILKY_NIF: ${{ secrets.BILKY_NIF }}
@@ -52,4 +60,15 @@ jobs:
           BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
           ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
+        if: steps.auth.outputs.allowed == 'true' && inputs.mode == 'status'
         run: npm run status
+
+      - name: Read current Bilky card only
+        if: steps.auth.outputs.allowed == 'true' && inputs.mode == 'read-only'
+        env:
+          BILKY_NIF: ${{ secrets.BILKY_NIF }}
+          BILKY_PASSWORD: ${{ secrets.BILKY_PASSWORD }}
+          BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
+          ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
+          ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
+        run: node src/read-only.js

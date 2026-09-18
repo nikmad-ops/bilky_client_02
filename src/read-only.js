@@ -24,41 +24,23 @@ for (const [name, value] of Object.entries({
   if (!value) throw new Error("Missing environment variable: " + name);
 }
 
-function log(message) {
-  console.log("[" + new Date().toISOString() + "] " + message);
+function clean(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
 
-function getMadridDate() {
+function madridDate() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: TIMEZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(new Date());
-
-  const value = (type) =>
-    parts.find((part) => part.type === type)?.value;
-
-  return value("year") + "-" + value("month") + "-" + value("day");
-}
-
-const targetDate = getMadridDate();
-
-function extractVisibleTime(text) {
-  const match = String(text || "").match(/\b\d{2}:\d{2}\b/);
-  return match ? match[0] : null;
-}
-
-function extractFactTime(value) {
-  if (!value) return null;
-  const match = String(value).match(
-    /^\d{2}\/\d{2}\/\d{4}\s+(\d{2}:\d{2}:\d{2})$/
-  );
-  return match ? match[1] : null;
+  const v = (type) => parts.find((p) => p.type === type)?.value;
+  return v("year") + "-" + v("month") + "-" + v("day");
 }
 
 async function sendAdmin(message) {
-  const response = await fetch(
+  const r = await fetch(
     "https://api.telegram.org/bot" + ADMIN_TELEGRAM_BOT_TOKEN + "/sendMessage",
     {
       method: "POST",
@@ -69,262 +51,168 @@ async function sendAdmin(message) {
       }),
     }
   );
-
-  if (!response.ok) {
-    throw new Error(
-      "Admin Telegram failed: " + response.status + " " + await response.text()
-    );
+  if (!r.ok) {
+    throw new Error("Telegram failed: " + r.status + " " + await r.text());
   }
 }
 
-async function loginAndOpenWorkshift(page) {
-  log("READ ONLY: opening Bilky login.");
+const targetDate = madridDate();
+const [year, month, dayRaw] = targetDate.split("-");
+const day = String(Number(dayRaw));
+const monthNames = {
+  "01": ["ENERO","JANUARY"],
+  "02": ["FEBRERO","FEBRUARY"],
+  "03": ["MARZO","MARCH"],
+  "04": ["ABRIL","APRIL"],
+  "05": ["MAYO","MAY"],
+  "06": ["JUNIO","JUNE"],
+  "07": ["JULIO","JULY"],
+  "08": ["AGOSTO","AUGUST"],
+  "09": ["SEPTIEMBRE","SEPTEMBER"],
+  "10": ["OCTUBRE","OCTOBER"],
+  "11": ["NOVIEMBRE","NOVEMBER"],
+  "12": ["DICIEMBRE","DECEMBER"],
+}[month];
 
-  await page.goto(LOGIN_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 30000,
-  });
+const browser = await chromium.connectOverCDP(
+  "wss://production-ams.browserless.io/stealth?token=" + BROWSERLESS_TOKEN
+);
+const context = browser.contexts()[0] || (await browser.newContext());
+const page = context.pages()[0] || (await context.newPage());
 
-  const visibleInputs = page.locator("input:visible");
-  if ((await visibleInputs.count()) < 2) {
-    throw new Error("Bilky login fields not found");
-  }
+try {
+  console.log("READ ONLY: opening login");
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-  await visibleInputs.nth(0).fill(BILKY_NIF);
+  const inputs = page.locator("input:visible");
+  if ((await inputs.count()) < 2) throw new Error("Bilky login fields not found");
+
+  await inputs.nth(0).fill(BILKY_NIF);
   await page.locator('input[type="password"]').first().fill(BILKY_PASSWORD);
-
-  const submit = page.locator('button[type="submit"]').first();
-  if (!(await submit.count())) {
-    throw new Error("Bilky login button not found");
-  }
-
-  await submit.click();
+  await page.locator('button[type="submit"]').first().click();
 
   const deadline = Date.now() + 25000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(1000);
     if (!page.url().includes("/auth/login")) break;
   }
+  if (page.url().includes("/auth/login")) throw new Error("Login did not clear");
 
-  if (page.url().includes("/auth/login")) {
-    throw new Error(
-      "Bilky security verification/login did not clear within 25 seconds"
-    );
-  }
+  console.log("READ ONLY: after login URL=" + page.url());
 
-  log("READ ONLY: login OK. Current URL: " + page.url());
+  await page.goto(WORKSHIFT_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForTimeout(2500);
 
-  await page.goto(WORKSHIFT_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 30000,
-  });
+  console.log("READ ONLY: workshift URL=" + page.url());
+  console.log("READ ONLY: title=" + await page.title());
 
-  log("READ ONLY: workshift opened: " + page.url());
-}
+  const bodyText = clean(await page.locator("body").innerText());
+  console.log("----- BODY START -----");
+  console.log(bodyText.slice(0, 20000));
+  console.log("----- BODY END -----");
 
-async function inspectCell(cell, label) {
-  const text = (await cell.innerText()).replace(/\s+/g, " ").trim();
-
-  const inputs = cell.locator("input.clockpicker");
-  const inputValues = [];
-
-  for (let i = 0; i < (await inputs.count()); i += 1) {
-    inputValues.push(await inputs.nth(i).inputValue());
-  }
-
-  const titled = cell.locator("[data-original-title]");
-  const titles = [];
-
-  for (let i = 0; i < (await titled.count()); i += 1) {
-    const raw = await titled.nth(i).getAttribute("data-original-title");
-    if (raw) titles.push(raw);
-  }
-
-  const fact =
-    titles
-      .map(extractFactTime)
-      .find(Boolean) || null;
-
-  const clockButtons = cell.locator("a.clock");
-  const buttons = [];
-
-  for (let i = 0; i < (await clockButtons.count()); i += 1) {
-    const button = clockButtons.nth(i);
-
-    buttons.push({
-      id: await button.getAttribute("id"),
-      class: await button.getAttribute("class"),
-      text: (await button.innerText()).replace(/\s+/g, " ").trim(),
-      visible: await button.isVisible(),
-    });
-  }
-
-  const planned =
-    inputValues.find(Boolean) ||
-    extractVisibleTime(text);
-
-  const result = {
-    label,
-    text,
-    planned,
-    fact,
-    inputValues,
-    titles,
-    clockButtonCount: buttons.length,
-    buttons,
-  };
-
-  log(label.toUpperCase() + " JSON: " + JSON.stringify(result));
-
-  return result;
-}
-
-async function main() {
-  const browser = await chromium.connectOverCDP(
-    "wss://production-ams.browserless.io/stealth?token=" + BROWSERLESS_TOKEN
-  );
-
-  const context =
-    browser.contexts()[0] ||
-    (await browser.newContext());
-
-  const page =
-    context.pages()[0] ||
-    (await context.newPage());
-
-  try {
-    await loginAndOpenWorkshift(page);
-
-    const containerSelector = "#container_" + targetDate;
-    const container = page.locator(containerSelector).first();
-
-    await container.waitFor({
-      state: "visible",
-      timeout: 15000,
-    });
-
-    const pageText = (await page.locator("body").innerText())
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const cardText = (await container.innerText())
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const cardHtml = await container.evaluate((el) => el.outerHTML);
-
-    log("===== READ ONLY CURRENT CARD =====");
-    log("CLIENT=" + CLIENT_NAME);
-    log("TARGET_DATE=" + targetDate);
-    log("CONTAINER=" + containerSelector);
-    log("CARD TEXT: " + cardText);
-
-    const row = container
-      .locator("tr")
-      .filter({ hasText: /First shift|Primer turno/ })
-      .first();
-
-    if (!(await row.count())) {
-      throw new Error("First shift / Primer turno row not found");
-    }
-
-    const rowText = (await row.innerText())
-      .replace(/\s+/g, " ")
-      .trim();
-
-    log("SHIFT ROW TEXT: " + rowText);
-
-    const cells = row.locator("td.hr-container");
-    const cellCount = await cells.count();
-
-    log("SHIFT CELL COUNT: " + cellCount);
-
-    if (cellCount < 2) {
-      throw new Error(
-        "Expected at least 2 hr-container cells; found " + cellCount
-      );
-    }
-
-    const morning = await inspectCell(cells.nth(0), "morning");
-    const evening = await inspectCell(cells.nth(1), "evening");
-
-    const signed =
-      (await container
-        .locator(".badge-success")
-        .filter({ hasText: /Signed|Firmado/ })
-        .count()) > 0;
-
-    const signButtonCount = await container.locator("button#sign").count();
-
-    const pendingSignature =
-      /Pending signature|Pendiente de firmar/i.test(cardText);
-
-    const ficharCount =
-      await container
-        .getByText(/^(Fichar|Clock in|Clock out)$/i, {
-          exact: true,
-        })
-        .count();
-
-    const identityMatch = pageText.match(
-      /ID\s+(.+?)(?=\s+Entidad|\s+Portal Empleado|\s+Panel de control)/i
-    );
-
-    const recognized = {
-      client: CLIENT_NAME,
-      targetDate,
-      identity: identityMatch ? identityMatch[1].trim() : null,
-      signed,
-      pendingSignature,
-      signButtonCount,
-      ficharCount,
-      morning,
-      evening,
+  const probe = await page.evaluate(({ targetDate, year, day, monthNames }) => {
+    const clean = (x) => String(x || "").replace(/\s+/g, " ").trim();
+    const out = {
+      exactContainerCount: 0,
+      exactContainerHtml: null,
+      shiftLabels: [],
+      dateCandidates: [],
+      interesting: [],
     };
 
-    log("RECOGNIZED JSON: " + JSON.stringify(recognized));
-    log("===== RAW CARD HTML START =====");
-    console.log(cardHtml);
-    log("===== RAW CARD HTML END =====");
-    log("READ ONLY COMPLETE. NO FICHAR/SIGN ACTION WAS PERFORMED.");
+    const exact = document.querySelectorAll("#container_" + targetDate);
+    out.exactContainerCount = exact.length;
+    if (exact[0]) out.exactContainerHtml = exact[0].outerHTML.slice(0, 12000);
 
-    const summary = [
-      "🔎 Bilky READ ONLY — " + CLIENT_NAME + " — " + targetDate,
-      "",
-      "Card: FOUND",
-      "Identity: " + (recognized.identity || "not parsed"),
-      "Morning: plan=" + (morning.planned || "NONE") +
-        ", fact=" + (morning.fact || "NONE") +
-        ", clockButtons=" + morning.clockButtonCount,
-      "Evening: plan=" + (evening.planned || "NONE") +
-        ", fact=" + (evening.fact || "NONE") +
-        ", clockButtons=" + evening.clockButtonCount,
-      "Signed: " + signed,
-      "Sign button count: " + signButtonCount,
-      "Pending signature: " + pendingSignature,
-      "Fichar count in card: " + ficharCount,
-      "",
-      "Card text: " + cardText,
-      "",
-      "READ ONLY. No Fichar/Sign action performed.",
-    ].join("\n");
+    const all = [...document.querySelectorAll("body *")];
 
-    await sendAdmin(summary);
-  } catch (error) {
-    console.error("READ ONLY FAILED: " + error.message);
+    for (const el of all) {
+      const t = clean(el.textContent);
+      if (!t) continue;
 
-    try {
-      await sendAdmin(
-        "❌ Bilky READ ONLY — " + CLIENT_NAME + " — " + targetDate +
-        ". ERROR: " + error.message +
-        ". No Fichar/Sign action was performed."
-      );
-    } catch {}
+      if (t === "Primer turno" || t === "First shift") {
+        const chain = [];
+        let p = el;
+        for (let depth = 0; p && depth < 8; depth++, p = p.parentElement) {
+          chain.push({
+            depth,
+            tag: p.tagName,
+            id: p.id || "",
+            cls: typeof p.className === "string" ? p.className : "",
+            text: clean(p.textContent).slice(0, 1000),
+          });
+        }
+        out.shiftLabels.push(chain);
+      }
 
-    throw error;
-  } finally {
-    await browser.close();
-  }
+      const upper = t.toUpperCase();
+      const hasDate =
+        t.includes(year) &&
+        monthNames.some((m) => upper.includes(m)) &&
+        new RegExp("(^|\\s)" + day + "(\\s|$)").test(t);
+
+      if (hasDate && /Primer turno|First shift|Fichar|Clock in|Clock out|Firmar|Sign/i.test(t)) {
+        out.dateCandidates.push({
+          tag: el.tagName,
+          id: el.id || "",
+          cls: typeof el.className === "string" ? el.className : "",
+          text: t.slice(0, 2000),
+          html: el.outerHTML.slice(0, 8000),
+        });
+        if (out.dateCandidates.length >= 20) break;
+      }
+    }
+
+    for (const el of all) {
+      const t = clean(el.textContent);
+      if (!t || t.length > 300) continue;
+      if (/turno|shift|fichar|clock|firmar|signed|firmado|pendiente|september|septiembre|08:00|16:00/i.test(t)) {
+        out.interesting.push({
+          tag: el.tagName,
+          id: el.id || "",
+          cls: typeof el.className === "string" ? el.className : "",
+          text: t,
+        });
+      }
+      if (out.interesting.length >= 300) break;
+    }
+
+    return out;
+  }, { targetDate, year, day, monthNames });
+
+  console.log("----- PROBE JSON START -----");
+  console.log(JSON.stringify(probe, null, 2));
+  console.log("----- PROBE JSON END -----");
+
+  await page.screenshot({
+    path: "read-only-workshift.png",
+    fullPage: true,
+  });
+
+  console.log("READ ONLY COMPLETE. NO FICHAR/SIGN ACTION WAS PERFORMED.");
+
+  const summary = [
+    "🔎 Bilky READ ONLY — " + CLIENT_NAME + " — " + targetDate,
+    "",
+    "Exact #container_" + targetDate + ": " + probe.exactContainerCount,
+    "Shift labels found: " + probe.shiftLabels.length,
+    "Date candidates found: " + probe.dateCandidates.length,
+    "",
+    "No Fichar/Sign action performed.",
+  ].join("\n");
+
+  await sendAdmin(summary);
+} catch (error) {
+  console.error("READ ONLY FAILED: " + error.message);
+  try {
+    await sendAdmin(
+      "❌ Bilky READ ONLY — " + CLIENT_NAME + " — " + targetDate +
+      ". ERROR: " + error.message +
+      ". No Fichar/Sign action was performed."
+    );
+  } catch {}
+  throw error;
+} finally {
+  await browser.close();
 }
-
-await main();

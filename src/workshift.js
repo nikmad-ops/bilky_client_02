@@ -593,6 +593,192 @@ async function signDay(page) {
   return state;
 }
 
+
+async function securityVerificationDetected(page) {
+  let title = "";
+  let body = "";
+
+  try {
+    title = await page.title();
+  } catch {}
+
+  try {
+    body = await page.locator("body").innerText();
+  } catch {}
+
+  const frameUrls = page
+    .frames()
+    .map((frame) => frame.url())
+    .join(" ");
+
+  const signal = [
+    page.url(),
+    title,
+    body,
+    frameUrls,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    signal.includes("performing security verification") ||
+    signal.includes("verify you are human") ||
+    signal.includes("security verification") ||
+    signal.includes("just a moment") ||
+    signal.includes("cdn-cgi/challenge-platform") ||
+    signal.includes("challenges.cloudflare.com")
+  );
+}
+
+function cloudflareVerificationError() {
+  const error = new Error(
+    "Cloudflare security verification blocked Bilky page"
+  );
+
+  error.code =
+    "CLOUDFLARE_SECURITY_VERIFICATION";
+
+  return error;
+}
+
+async function assertNoSecurityVerification(page) {
+  if (
+    await securityVerificationDetected(
+      page
+    )
+  ) {
+    throw cloudflareVerificationError();
+  }
+}
+
+async function waitBeforeCloudflareRetry() {
+  const delayMs =
+    3 * 60 * 1000;
+
+  log(
+    "Cloudflare verification detected. Waiting 3 minutes before a completely new Browserless session."
+  );
+
+  await new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        delayMs
+      )
+  );
+}
+
+async function runWorkshiftAttempt(attempt) {
+  log(
+    `Starting Browserless attempt ${attempt}/2`
+  );
+
+  const browser =
+    await chromium.connectOverCDP(
+      `wss://production-ams.browserless.io/stealth?token=${BROWSERLESS_TOKEN}`
+    );
+
+  const context =
+    browser.contexts()[0] ||
+    (await browser.newContext());
+
+  const page =
+    context.pages()[0] ||
+    (await context.newPage());
+
+  try {
+    await loginAndOpenWorkshift(
+      page
+    );
+
+    await page.waitForTimeout(
+      1500
+    );
+
+    await assertNoSecurityVerification(
+      page
+    );
+
+    let state;
+
+    try {
+      state =
+        await readDayState(
+          page,
+          targetDate
+        );
+    } catch (error) {
+      if (
+        await securityVerificationDetected(
+          page
+        )
+      ) {
+        throw cloudflareVerificationError();
+      }
+
+      throw error;
+    }
+
+    printState(state);
+
+    if (
+      ACTION ===
+      "morning"
+    ) {
+      const result =
+        await clock(
+          page,
+          state,
+          "morning"
+        );
+
+      await sendTelegram(
+        `✅ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: Morning. Fact: ${shortFact(result.fact)}`
+      );
+
+      log(
+        "MORNING SUCCESS"
+      );
+
+      return;
+    }
+
+    const result =
+      await clock(
+        page,
+        state,
+        "evening"
+      );
+
+    const finalState =
+      await signDay(
+        page
+      );
+
+    const duration =
+      dayDuration(
+        finalState.morning.fact,
+        finalState.evening.fact
+      );
+
+    if (!duration) {
+      throw new Error(
+        "Unable to calculate DAY from morning/evening facts"
+      );
+    }
+
+    await sendTelegram(
+      `✅ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: Evening. Fact: ${shortFact(result.fact)}, Signed. Workday ${duration}`
+    );
+
+    log(
+      "EVENING SUCCESS"
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   fs.mkdirSync(
     "diagnostics",
@@ -611,115 +797,68 @@ async function main() {
     `EXECUTE=${EXECUTE}`
   );
 
-  if (EXECUTE !== "true") {
+  if (
+    EXECUTE !==
+    "true"
+  ) {
     throw new Error(
       "Execution blocked by internal kill switch: EXECUTE must equal true"
     );
   }
 
-  const browser =
-    await chromium.connectOverCDP(
-      `wss://production-ams.browserless.io/stealth?token=${BROWSERLESS_TOKEN}`
-    );
+  let lastError = null;
 
-  const context =
-    browser.contexts()[0] ||
-    (await browser.newContext());
-
-  const page =
-    context.pages()[0] ||
-    (await context.newPage());
-
-  try {
-    await loginAndOpenWorkshift(page);
-
-    let state =
-      await readDayState(
-        page,
-        targetDate
+  for (
+    let attempt = 1;
+    attempt <= 2;
+    attempt += 1
+  ) {
+    try {
+      await runWorkshiftAttempt(
+        attempt
       );
-
-    printState(state);
-
-    if (ACTION === "morning") {
-      const result =
-        await clock(
-          page,
-          state,
-          "morning"
-        );
-
-      await sendTelegram(
-        `✅ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: Morning. Fact: ${shortFact(result.fact)}`
-      );
-
-      log("MORNING SUCCESS");
 
       return;
-    }
+    } catch (error) {
+      lastError =
+        error;
 
-    const result =
-      await clock(
-        page,
-        state,
-        "evening"
-      );
-
-    const finalState =
-      await signDay(page);
-
-    const duration =
-      dayDuration(
-        finalState.morning.fact,
-        finalState.evening.fact
-      );
-
-    if (!duration) {
-      throw new Error(
-        "Unable to calculate DAY from morning/evening facts"
-      );
-    }
-
-    await sendTelegram(
-      `✅ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: Evening. Fact: ${shortFact(result.fact)}, Signed. Workday ${duration}`
-    );
-
-    log("EVENING SUCCESS");
-
-  } catch (error) {
-    console.error(
-      `FAILED: ${error.message}`
-    );
-
-    try {
-      await page.screenshot({
-        path: "diagnostics/workshift-error.png",
-        fullPage: true,
-      });
-    } catch {
-      // Ignore screenshot failure
-    }
-
-    const label =
-      ACTION === "morning"
-        ? "Morning"
-        : "Evening";
-
-    try {
-      await sendTelegram(
-        `❌ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: ${label}. ERROR: ${error.message}`
-      );
-    } catch (telegramError) {
       console.error(
-        `Telegram error notification failed: ${telegramError.message}`
+        `Attempt ${attempt} failed: ${error.message}`
       );
+
+      if (
+        error.code ===
+          "CLOUDFLARE_SECURITY_VERIFICATION" &&
+        attempt === 1
+      ) {
+        await waitBeforeCloudflareRetry();
+        continue;
+      }
+
+      break;
     }
-
-    throw error;
-
-  } finally {
-    await browser.close();
   }
+
+  const label =
+    ACTION === "morning"
+      ? "Morning"
+      : "Evening";
+
+  try {
+    await sendTelegram(
+      `❌ Bilky for ${CLIENT_NAME} ${displayDate(targetDate)}: ${label}. ERROR: ${lastError?.message || "Unknown error"}`
+    );
+  } catch (telegramError) {
+    console.error(
+      `Telegram error notification failed: ${telegramError.message}`
+    );
+  }
+
+  throw lastError ||
+    new Error(
+      "Bilky workshift failed"
+    );
 }
 
 await main();

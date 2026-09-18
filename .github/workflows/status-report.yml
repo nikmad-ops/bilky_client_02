@@ -60,7 +60,6 @@ jobs:
           BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
           ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
-        if: steps.auth.outputs.allowed == 'true' && inputs.mode == 'status'
         run: npm run status
 
       - name: Read current Bilky card only

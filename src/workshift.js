@@ -100,12 +100,10 @@ function extractFact(value) {
 
 async function locateDay(page, date) {
   const legacy = page.locator(`#container_${date}`);
-  if (await legacy.count()) {
-    try {
-      await legacy.waitFor({ state: "visible", timeout: 2500 });
-      return { locator: legacy, mode: "legacy" };
-    } catch {}
-  }
+  try {
+    await legacy.waitFor({ state: "visible", timeout: 8000 });
+    return { locator: legacy, mode: "legacy" };
+  } catch {}
 
   const [, month, dayRaw] = date.split("-");
   const day = String(Number(dayRaw));
@@ -134,9 +132,7 @@ async function locateDay(page, date) {
           text.includes(year) &&
           monthNames.some((m) => text.toUpperCase().includes(m)) &&
           new RegExp(`(^|\\s)${day}(\\s|$)`).test(text) &&
-          /Primer turno|First shift/.test(text) &&
-          text.includes("08:00") &&
-          text.includes("16:00")
+          /Primer turno|First shift/.test(text)
         ) {
           matches.push(el);
           break;

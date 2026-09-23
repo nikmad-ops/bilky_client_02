@@ -30,22 +30,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Requested action: ${ACTION}"
-          echo "Execute: ${EXECUTE}"
 
           if [ "${EXECUTE}" != "true" ]; then
-            echo "Execution disabled. No Bilky browser session will be started."
             echo "allowed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           MADRID_TIME=$(TZ=Europe/Madrid date +%H%M)
-          MADRID_DATE=$(TZ=Europe/Madrid date +%F)
           MADRID_DOW=$(TZ=Europe/Madrid date +%u)
-
-          echo "Madrid date: ${MADRID_DATE}"
-          echo "Madrid time: ${MADRID_TIME}"
-          echo "Madrid weekday: ${MADRID_DOW}"
 
           if [ "${MADRID_DOW}" -gt 5 ]; then
             echo "Blocked: weekend."
@@ -88,6 +80,7 @@ jobs:
         run: npm install
 
       - name: Run Bilky workshift
+        id: bilky
         if: steps.safety.outputs.allowed == 'true'
         env:
           ACTION: ${{ inputs.action }}
@@ -95,8 +88,101 @@ jobs:
           BILKY_NIF: ${{ secrets.BILKY_NIF }}
           BILKY_PASSWORD: ${{ secrets.BILKY_PASSWORD }}
           BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
+        run: npm run workshift
+
+      - name: Telegram success
+        if: success() && steps.safety.outputs.allowed == 'true'
+        env:
+          ACTION: ${{ inputs.action }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
-        run: npm run workshift
+          ALENA_TELEGRAM_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
+          ALENA_TELEGRAM_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE=$(TZ=Europe/Madrid date +%d.%m.%Y)
+          FACT=$(jq -r '.fact // empty' run-result.json 2>/dev/null || true)
+          DURATION=$(jq -r '.duration // empty' run-result.json 2>/dev/null || true)
+
+          if [ "${ACTION}" = "morning" ]; then
+            MESSAGE="✅ Bilky for Irakli ${DATE}: Morning. Fact: ${FACT:0:5}"
+          else
+            MESSAGE="✅ Bilky for Irakli ${DATE}: Evening. Fact: ${FACT:0:5}"
+            if [ -n "${DURATION}" ]; then
+              MESSAGE="${MESSAGE}"$'\n'"Full working day: ${DURATION}"
+            fi
+          fi
+
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+            "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+
+          if [ -n "${ALENA_TELEGRAM_BOT_TOKEN}" ] && [ -n "${ALENA_TELEGRAM_CHAT_ID}" ]; then
+            curl --fail --silent --show-error \
+              --request POST \
+              --header 'Content-Type: application/json' \
+              --data "$(jq -nc --arg chat_id "${ALENA_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+              "https://api.telegram.org/bot${ALENA_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+          else
+            echo "Alena notification secrets are not configured in this repository."
+          fi
+
+      - name: Telegram failure
+        if: failure() && steps.safety.outputs.allowed == 'true'
+        env:
+          ACTION: ${{ inputs.action }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
+          ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
+          ALENA_TELEGRAM_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
+          ALENA_TELEGRAM_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE=$(TZ=Europe/Madrid date +%d.%m.%Y)
+          if [ "${ACTION}" = "morning" ]; then LABEL="Morning"; else LABEL="Evening"; fi
+          MESSAGE="❌ Bilky for Irakli ${DATE}: ${LABEL}. ERROR"
+
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
+
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+            "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
+
+          if [ -n "${ALENA_TELEGRAM_BOT_TOKEN}" ] && [ -n "${ALENA_TELEGRAM_CHAT_ID}" ]; then
+            curl --fail --silent --show-error \
+              --request POST \
+              --header 'Content-Type: application/json' \
+              --data "$(jq -nc --arg chat_id "${ALENA_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
+              "https://api.telegram.org/bot${ALENA_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
+          fi
+
+      - name: Upload Bilky diagnostics
+        if: always() && steps.safety.outputs.allowed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilky-workshift-diagnostics-${{ github.run_id }}
+          path: |
+            diagnostics/
+            run-result.json
+            run-error.txt
+          if-no-files-found: ignore
+          retention-days: 14

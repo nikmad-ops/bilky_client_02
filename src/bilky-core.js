@@ -190,10 +190,23 @@ export function createBilkyCore({
     let lastNavigationError = null;
 
     for (let navAttempt = 1; navAttempt <= 2; navAttempt += 1) {
+      if (solverEnabled) {
+        // Cloudflare may finish the navigation itself after solving the challenge.
+        // Give it a moment and do not start a competing page.goto() if we are
+        // already on the requested workshift page.
+        await sleep(2500);
+
+        if (page.url().startsWith(WORKSHIFT_URL)) {
+          log("Workshift URL already reached after CAPTCHA; skipping page.goto.");
+          lastNavigationError = null;
+          break;
+        }
+      }
+
       try {
         await page.goto(WORKSHIFT_URL, {
           waitUntil: "commit",
-          timeout: 15000,
+          timeout: solverEnabled ? 30000 : 15000,
         });
         lastNavigationError = null;
         break;
@@ -206,6 +219,12 @@ export function createBilkyCore({
 
         log(`Workshift navigation interrupted; waiting for solver to settle before retry: ${shortError(error)}`);
         await waitForSolverIdle(page, 15000);
+
+        if (page.url().startsWith(WORKSHIFT_URL)) {
+          log("Workshift URL reached while solver settled; skipping retry page.goto.");
+          lastNavigationError = null;
+          break;
+        }
       }
     }
 
@@ -454,19 +473,40 @@ export function createBilkyCore({
       throw new Error(`Bilky clock-hour returned HTTP ${response.status()}`);
     }
 
-    let fact = null;
-    try {
-      const body = await response.text();
-      const match = body.match(/\b(\d{2}:\d{2}:\d{2})\b/);
-      fact = match ? match[1] : null;
-    } catch {}
+    log(`${mode}: HTTP 200 accepted. Waiting for Bilky page to expose the saved fact.`);
 
-    log(`${mode}: HTTP 200 accepted. No reload/verification.`);
+    // The clock-hour response can contain unrelated times. The authoritative
+    // fact is the clock icon in the relevant shift cell after Bilky updates
+    // the day container.
+    let verifiedState = null;
+    let fact = null;
+    const factDeadline = Date.now() + 15000;
+
+    while (Date.now() < factDeadline) {
+      await sleep(500);
+
+      try {
+        verifiedState = await readDayState(page, date);
+        fact =
+          mode === "morning"
+            ? verifiedState.morning.fact
+            : verifiedState.evening.fact;
+      } catch {}
+
+      if (fact) {
+        log(`${mode}: verified fact from page = ${fact}`);
+        break;
+      }
+    }
+
+    if (!fact) {
+      throw new Error(`${mode}: HTTP 200 accepted but saved fact was not found in the Bilky page`);
+    }
 
     return {
       alreadyDone: false,
       fact,
-      state,
+      state: verifiedState || state,
       httpAccepted: true,
     };
   }

@@ -7,6 +7,11 @@ on:
         description: 'Telegram chat id requesting status'
         required: true
         type: string
+      mode:
+        description: 'Compatibility input from Telegram dispatcher'
+        required: false
+        default: 'status'
+        type: string
 
 jobs:
   status:

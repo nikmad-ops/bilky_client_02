@@ -1,16 +1,16 @@
 import fs from "node:fs";
 import {
   TIMEZONE,
-  createBilkyCore,
+  createStatusCore,
   formatDuration,
   log,
   minutesFromTime,
-} from "./bilky-core.js";
+} from "./status-core.js";
 
 const {
   BILKY_NIF,
   BILKY_PASSWORD,
-  BROWSERLESS_TOKEN,
+  AIRTOP_API_KEY,
   REQUEST_CHAT_ID,
   TELEGRAM_CHAT_ID,
   CLIENT_NAME,
@@ -19,7 +19,7 @@ const {
 for (const [name, value] of Object.entries({
   BILKY_NIF,
   BILKY_PASSWORD,
-  BROWSERLESS_TOKEN,
+  AIRTOP_API_KEY,
   REQUEST_CHAT_ID,
   TELEGRAM_CHAT_ID,
   CLIENT_NAME,
@@ -448,7 +448,7 @@ function classifyDay(
       nowMinutes <
         8 *
           60 +
-          30
+          25
     ) {
       return {
         line:
@@ -471,9 +471,9 @@ function classifyDay(
       relation ===
         0 &&
       nowMinutes <=
-        18 *
+        16 *
           60 +
-          30
+          50
     ) {
       return {
         line:
@@ -523,13 +523,13 @@ function classifyDay(
 }
 
 const bilky =
-  createBilkyCore({
+  createStatusCore({
     nif:
       BILKY_NIF,
     password:
       BILKY_PASSWORD,
-    browserlessToken:
-      BROWSERLESS_TOKEN,
+    airtopApiKey:
+      AIRTOP_API_KEY,
   });
 
 async function buildStatus({
@@ -629,8 +629,7 @@ async function buildStatus({
 
 async function main() {
   const report =
-    await bilky.runWithRetries(
-      "Bilky status",
+    await bilky.run(
       buildStatus
     );
 

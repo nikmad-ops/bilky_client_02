@@ -109,17 +109,9 @@ export function createBilkyCore({
       });
 
       cdp.on("Browserless.captchaAutoSolved", (event) => {
-        const now = Date.now();
-        state.lastEventAt = now;
-
-        if (event?.solved) {
-          state.active = false;
-          state.lastSolvedAt = now;
-        } else if (!state.lastSolvedAt || now - state.lastSolvedAt > 5000) {
-          // Ignore a transient solved=false immediately after a successful solve.
-          state.active = true;
-        }
-
+        state.active = !event?.solved;
+        state.lastEventAt = Date.now();
+        if (event?.solved) state.lastSolvedAt = Date.now();
         log(`Browserless CAPTCHA solved=${Boolean(event?.solved)} time=${event?.time ?? "unknown"}ms`);
       });
     } catch (error) {
@@ -193,38 +185,50 @@ export function createBilkyCore({
 
     if (solverEnabled) {
       await waitForSolverIdle(page, 15000);
+    }
 
-      const container = page.locator(`#container_${date}`);
-      const settleDeadline = Date.now() + 10000;
+    let lastNavigationError = null;
 
-      while (Date.now() < settleDeadline) {
-        if (await container.isVisible().catch(() => false)) {
-          log("Workshift ready after CAPTCHA auto-navigation; skipping page.goto.");
-          return;
-        }
+    for (let navAttempt = 1; navAttempt <= 2; navAttempt += 1) {
+      if (solverEnabled) {
+        // Cloudflare may finish the navigation itself after solving the challenge.
+        // Give it a moment and do not start a competing page.goto() if we are
+        // already on the requested workshift page.
+        await sleep(2500);
 
         if (page.url().startsWith(WORKSHIFT_URL)) {
+          log("Workshift URL already reached after CAPTCHA; skipping page.goto.");
+          lastNavigationError = null;
           break;
         }
-
-        await sleep(500);
       }
 
-      if (!page.url().startsWith(WORKSHIFT_URL)) {
-        log("Workshift was not reached automatically after CAPTCHA; using one fallback page.goto.");
+      try {
         await page.goto(WORKSHIFT_URL, {
           waitUntil: "commit",
-          timeout: 30000,
+          timeout: solverEnabled ? 30000 : 15000,
         });
-      } else {
-        log("Workshift URL reached after CAPTCHA; skipping page.goto.");
+        lastNavigationError = null;
+        break;
+      } catch (error) {
+        lastNavigationError = error;
+
+        if (!solverEnabled || navAttempt === 2) {
+          throw error;
+        }
+
+        log(`Workshift navigation interrupted; waiting for solver to settle before retry: ${shortError(error)}`);
+        await waitForSolverIdle(page, 15000);
+
+        if (page.url().startsWith(WORKSHIFT_URL)) {
+          log("Workshift URL reached while solver settled; skipping retry page.goto.");
+          lastNavigationError = null;
+          break;
+        }
       }
-    } else {
-      await page.goto(WORKSHIFT_URL, {
-        waitUntil: "commit",
-        timeout: 15000,
-      });
     }
+
+    if (lastNavigationError) throw lastNavigationError;
 
     const container = page.locator(`#container_${date}`);
     const deadline = Date.now() + 20000;

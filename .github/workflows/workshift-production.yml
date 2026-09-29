@@ -1,8 +1,17 @@
 name: Bilky Production
+run-name: Bilky ${{ inputs.mode }} ${{ inputs.action }} attempt ${{ inputs.attempt }} ${{ inputs.request_id }}
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'scheduled or manual'
+        required: true
+        default: 'scheduled'
+        type: choice
+        options:
+          - scheduled
+          - manual
       action:
         description: 'morning or evening'
         required: true
@@ -10,11 +19,23 @@ on:
         options:
           - morning
           - evening
+      attempt:
+        description: 'attempt number 1..5'
+        required: true
+        type: number
+      request_id:
+        description: 'scheduler request id'
+        required: true
+        type: string
       execute:
-        description: 'Allow Bilky click operations'
+        description: 'allow Bilky click operations'
         required: true
         default: false
         type: boolean
+
+concurrency:
+  group: bilky-production-${{ inputs.action }}
+  cancel-in-progress: false
 
 jobs:
   workshift:
@@ -25,164 +46,148 @@ jobs:
       - name: Safety gate
         id: safety
         env:
+          MODE: ${{ inputs.mode }}
           ACTION: ${{ inputs.action }}
+          ATTEMPT: ${{ inputs.attempt }}
           EXECUTE: ${{ inputs.execute }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${EXECUTE}" != "true" ]; then
-            echo "allowed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          [ "${EXECUTE}" = "true" ] || { echo "Blocked: execute=false"; exit 1; }
+          [[ "${ATTEMPT}" =~ ^[1-5]$ ]] || { echo "Blocked: invalid attempt ${ATTEMPT}"; exit 1; }
+          [[ "${MODE}" =~ ^(scheduled|manual)$ ]] || { echo "Blocked: invalid mode ${MODE}"; exit 1; }
 
           MADRID_TIME=$(TZ=Europe/Madrid date +%H%M)
           MADRID_DOW=$(TZ=Europe/Madrid date +%u)
 
-          if [ "${MADRID_DOW}" -gt 5 ]; then
-            echo "Blocked: weekend."
-            exit 1
-          fi
+          [ "${MADRID_DOW}" -le 5 ] || { echo "Blocked: weekend"; exit 1; }
 
           case "${ACTION}" in
-            morning)
-              if [ "${MADRID_TIME}" -lt 0755 ] || [ "${MADRID_TIME}" -gt 0825 ]; then
-                echo "Blocked: morning execution outside 07:55-08:25 Europe/Madrid."
-                exit 1
-              fi
-              ;;
-            evening)
-              if [ "${MADRID_TIME}" -lt 1630 ] || [ "${MADRID_TIME}" -gt 1700 ]; then
-                echo "Blocked: evening execution outside 16:30-17:00 Europe/Madrid."
-                exit 1
-              fi
-              ;;
+            morning|evening) ;;
             *)
-              echo "Blocked: invalid action ${ACTION}."
+              echo "Blocked: invalid action ${ACTION}"
               exit 1
               ;;
           esac
 
-          echo "allowed=true" >> "$GITHUB_OUTPUT"
+          if [ "${MODE}" = "scheduled" ]; then
+            case "${ACTION}" in
+              morning)
+                if [ "${MADRID_TIME}" -lt 0755 ] || [ "${MADRID_TIME}" -gt 0825 ]; then
+                  echo "Blocked: morning outside 07:55-08:25 Europe/Madrid"
+                  exit 1
+                fi
+                ;;
+              evening)
+                if [ "${MADRID_TIME}" -lt 1630 ] || [ "${MADRID_TIME}" -gt 1700 ]; then
+                  echo "Blocked: evening outside 16:30-17:00 Europe/Madrid"
+                  exit 1
+                fi
+                ;;
+            esac
+          fi
 
-      - name: Checkout repository
-        if: steps.safety.outputs.allowed == 'true'
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        if: steps.safety.outputs.allowed == 'true'
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install dependencies
-        if: steps.safety.outputs.allowed == 'true'
-        run: npm install
+        run: npm install --no-audit --no-fund
 
       - name: Run Bilky workshift
         id: bilky
-        if: steps.safety.outputs.allowed == 'true'
         env:
           ACTION: ${{ inputs.action }}
+          ATTEMPT: ${{ inputs.attempt }}
           EXECUTE: 'true'
           BILKY_NIF: ${{ secrets.BILKY_NIF }}
           BILKY_PASSWORD: ${{ secrets.BILKY_PASSWORD }}
-          BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
-        run: npm run workshift
+          AIRTOP_API_KEY: ${{ secrets.AIRTOP_API_KEY_IRAKLY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm run workshift
+
+          test -s run-result.json
+
+          SUCCESS=$(jq -r '.success // false' run-result.json)
+          STATUS=$(jq -r '.status // empty' run-result.json)
+
+          [ "${SUCCESS}" = "true" ] || { echo "run-result is not successful"; exit 1; }
+          case "${STATUS}" in
+            clicked|already_done) ;;
+            *) echo "Unexpected run-result status: ${STATUS}"; exit 1 ;;
+          esac
+
+          if [ "${STATUS}" = "clicked" ]; then
+            HTTP_STATUS=$(jq -r '.httpStatus // empty' run-result.json)
+            [ "${HTTP_STATUS}" = "200" ] || { echo "Clicked without HTTP 200 proof"; exit 1; }
+            test -s run-committed.json
+          fi
 
       - name: Telegram success
-        if: success() && steps.safety.outputs.allowed == 'true'
+        if: success()
         env:
           ACTION: ${{ inputs.action }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
-          ALENA_TELEGRAM_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
-          ALENA_TELEGRAM_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
         shell: bash
         run: |
           set -euo pipefail
+
           DATE=$(TZ=Europe/Madrid date +%d.%m.%Y)
-          FACT=$(jq -r '.fact // empty' run-result.json 2>/dev/null || true)
-          DURATION=$(jq -r '.duration // empty' run-result.json 2>/dev/null || true)
+          STATUS=$(jq -r '.status' run-result.json)
+          FACT=$(jq -r '.fact // empty' run-result.json)
+          DURATION=$(jq -r '.duration // empty' run-result.json)
+          HTTP_STATUS=$(jq -r '.httpStatus // empty' run-result.json)
 
           if [ "${ACTION}" = "morning" ]; then
-            MESSAGE="✅ Bilky for Irakli ${DATE}: Morning. Fact: ${FACT:0:5}"
+            LABEL="Morning"
           else
-            MESSAGE="✅ Bilky for Irakli ${DATE}: Evening. Fact: ${FACT:0:5}"
-            if [ -n "${DURATION}" ]; then
-              MESSAGE="${MESSAGE}"$'\n'"Full working day: ${DURATION}"
+            LABEL="Evening"
+          fi
+
+          if [ "${STATUS}" = "clicked" ]; then
+            if [ "${HTTP_STATUS}" != "200" ]; then
+              echo "Refusing Telegram success without HTTP 200"
+              exit 1
             fi
           fi
 
-          curl --fail --silent --show-error \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
-
-          curl --fail --silent --show-error \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-            "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
-
-          if [ -n "${ALENA_TELEGRAM_BOT_TOKEN}" ] && [ -n "${ALENA_TELEGRAM_CHAT_ID}" ]; then
-            curl --fail --silent --show-error \
-              --request POST \
-              --header 'Content-Type: application/json' \
-              --data "$(jq -nc --arg chat_id "${ALENA_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-              "https://api.telegram.org/bot${ALENA_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+          if [ "${STATUS}" = "already_done" ]; then
+            if [ -n "${FACT}" ]; then
+              MESSAGE="✅ Bilky for Irakli ${DATE}: ${LABEL} already recorded. Fact: ${FACT:0:5}"
+            else
+              MESSAGE="✅ Bilky for Irakli ${DATE}: ${LABEL} already recorded. Fact unavailable"
+            fi
+          elif [ -n "${FACT}" ]; then
+            MESSAGE="✅ Bilky for Irakli ${DATE}: ${LABEL}. Fact: ${FACT:0:5}"
           else
-            echo "Alena notification secrets are not configured in this repository."
+            MESSAGE="✅ Bilky for Irakli ${DATE}: ${LABEL} recorded (HTTP 200). Fact unavailable"
           fi
 
-      - name: Telegram failure
-        if: failure() && steps.safety.outputs.allowed == 'true'
-        env:
-          ACTION: ${{ inputs.action }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ADMIN_TELEGRAM_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
-          ADMIN_TELEGRAM_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
-          ALENA_TELEGRAM_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
-          ALENA_TELEGRAM_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          DATE=$(TZ=Europe/Madrid date +%d.%m.%Y)
-          if [ "${ACTION}" = "morning" ]; then LABEL="Morning"; else LABEL="Evening"; fi
-          MESSAGE="❌ Bilky for Irakli ${DATE}: ${LABEL}. ERROR"
-
-          curl --fail --silent --show-error \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
-
-          curl --fail --silent --show-error \
-            --request POST \
-            --header 'Content-Type: application/json' \
-            --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-            "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
-
-          if [ -n "${ALENA_TELEGRAM_BOT_TOKEN}" ] && [ -n "${ALENA_TELEGRAM_CHAT_ID}" ]; then
-            curl --fail --silent --show-error \
-              --request POST \
-              --header 'Content-Type: application/json' \
-              --data "$(jq -nc --arg chat_id "${ALENA_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" \
-              "https://api.telegram.org/bot${ALENA_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || true
+          if [ -n "${DURATION}" ]; then
+            MESSAGE="${MESSAGE}"$'\n'"Full working day: ${DURATION}"
           fi
 
-      - name: Upload Bilky diagnostics
-        if: always() && steps.safety.outputs.allowed == 'true'
+          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+
+      - name: Upload diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bilky-workshift-diagnostics-${{ github.run_id }}
+          name: bilky-workshift-${{ github.run_id }}
           path: |
             diagnostics/
             run-result.json
             run-error.txt
+            run-committed.json
           if-no-files-found: ignore
           retention-days: 14

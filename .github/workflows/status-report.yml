@@ -23,7 +23,7 @@ jobs:
         id: auth
         env:
           REQUEST_CHAT_ID: ${{ inputs.chat_id }}
-          CLIENT_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
+          CLIENT_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
         shell: bash
         run: |
@@ -86,8 +86,8 @@ jobs:
         if: success() && steps.auth.outputs.allowed == 'true'
         env:
           RECIPIENT: ${{ steps.auth.outputs.recipient }}
-          CLIENT_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
-          CLIENT_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
+          CLIENT_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLIENT_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
         shell: bash
@@ -113,8 +113,8 @@ jobs:
         if: failure() && steps.auth.outputs.allowed == 'true'
         env:
           RECIPIENT: ${{ steps.auth.outputs.recipient }}
-          CLIENT_BOT_TOKEN: ${{ secrets.ALENA_TELEGRAM_BOT_TOKEN }}
-          CLIENT_CHAT_ID: ${{ secrets.ALENA_TELEGRAM_CHAT_ID }}
+          CLIENT_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLIENT_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_TELEGRAM_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_TELEGRAM_CHAT_ID }}
         shell: bash

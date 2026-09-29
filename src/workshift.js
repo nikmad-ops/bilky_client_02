@@ -1,29 +1,28 @@
 import fs from "node:fs";
 import {
-  createBilkyCore,
-  dayDuration,
-  getMadridDate,
+  createProductionClient,
+  madridDate,
   log,
-} from "./bilky-core.js";
+} from "./production-core.js";
 
 const {
   BILKY_NIF,
   BILKY_PASSWORD,
-  BROWSERLESS_TOKEN,
+  AIRTOP_API_KEY,
   ACTION,
+  ATTEMPT,
   EXECUTE,
 } = process.env;
 
 for (const [name, value] of Object.entries({
   BILKY_NIF,
   BILKY_PASSWORD,
-  BROWSERLESS_TOKEN,
+  AIRTOP_API_KEY,
   ACTION,
+  ATTEMPT,
   EXECUTE,
 })) {
-  if (!value) {
-    throw new Error(`Missing environment variable: ${name}`);
-  }
+  if (!value) throw new Error(`Missing environment variable: ${name}`);
 }
 
 if (!["morning", "evening"].includes(ACTION)) {
@@ -31,100 +30,61 @@ if (!["morning", "evening"].includes(ACTION)) {
 }
 
 if (EXECUTE !== "true") {
-  throw new Error("Execution blocked by internal kill switch: EXECUTE must equal true");
+  throw new Error("Execution blocked: EXECUTE must equal true");
 }
 
-const targetDate = getMadridDate();
+const attempt = Number(ATTEMPT);
+if (![1, 2, 3, 4, 5].includes(attempt)) {
+  throw new Error(`ATTEMPT must be 1..5. Got: ${ATTEMPT}`);
+}
 
-const bilky = createBilkyCore({
+const date = madridDate();
+
+const client = createProductionClient({
   nif: BILKY_NIF,
   password: BILKY_PASSWORD,
-  browserlessToken: BROWSERLESS_TOKEN,
+  airtopApiKey: AIRTOP_API_KEY,
+  attempt,
 });
 
-function writeResult(result) {
-  fs.writeFileSync(
-    "run-result.json",
-    JSON.stringify(
-      {
-        date: targetDate,
-        action: ACTION,
-        ...result,
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
-}
+async function main() {
+  fs.rmSync("run-result.json", { force: true });
+  fs.rmSync("run-error.txt", { force: true });
+  fs.rmSync("run-committed.json", { force: true });
 
-async function runAction({ page, setStage }) {
-  setStage("read-current-state");
+  log(`TARGET_DATE=${date}`);
+  log(`ACTION=${ACTION}`);
+  log(`ATTEMPT=${attempt}/5`);
 
-  const state = await bilky.readDayState(page, targetDate);
-  bilky.printState(state);
+  try {
+    const result = await client.execute(ACTION, date);
 
-  if (ACTION === "morning") {
-    const result = await bilky.clock(
-      page,
-      state,
-      "morning",
-      targetDate,
-      setStage
+    fs.writeFileSync(
+      "run-result.json",
+      JSON.stringify({ date, ...result }, null, 2),
+      "utf8"
     );
 
-    return {
-      fact: result.fact || state.morning.fact || null,
-      alreadyDone: result.alreadyDone,
-      httpAccepted: Boolean(result.httpAccepted || result.alreadyDone),
-    };
+    log(
+      `SUCCESS status=${result.status} fact=${result.fact || "NONE"} http=${result.httpStatus ?? "N/A"}`
+    );
+  } catch (error) {
+    const message = String(error?.message || error || "Unknown error")
+      .split("\n")[0]
+      .slice(0, 300);
+
+    fs.writeFileSync("run-error.txt", message, "utf8");
+    throw error;
+  } finally {
+    await client.close();
   }
-
-  const clockResult = await bilky.clock(
-    page,
-    state,
-    "evening",
-    targetDate,
-    setStage
-  );
-
-  const eveningFact =
-    clockResult.fact ||
-    state.evening.fact ||
-    null;
-
-  return {
-    fact: eveningFact,
-    alreadyDone: clockResult.alreadyDone,
-    httpAccepted: Boolean(clockResult.httpAccepted || clockResult.alreadyDone),
-    duration: dayDuration(state.morning.fact, eveningFact),
-  };
-}
-
-async function main() {
-  log(`TARGET_DATE=${targetDate}`);
-  log(`ACTION=${ACTION}`);
-
-  const result = await bilky.runWithRetries(
-    `Bilky ${ACTION}`,
-    runAction
-  );
-
-  writeResult(result);
-  log(`${ACTION.toUpperCase()} SUCCESS`);
 }
 
 main()
-  .then(() => process.exit(0))
+  .then(() => {
+    process.exit(0);
+  })
   .catch((error) => {
-    try {
-      fs.writeFileSync(
-        "run-error.txt",
-        String(error?.message || error || "Unknown error").split("\n")[0].slice(0, 300),
-        "utf8"
-      );
-    } catch {}
-
     console.error(error);
     process.exit(1);
   });

@@ -131,6 +131,7 @@ jobs:
 
       - name: Telegram success
         if: success()
+        continue-on-error: true
         env:
           ACTION: ${{ inputs.action }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -176,8 +177,18 @@ jobs:
             MESSAGE="${MESSAGE}"$'\n'"Full working day: ${DURATION}"
           fi
 
-          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
-          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null
+          CLIENT_RC=0
+          ADMIN_RC=0
+
+          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || CLIENT_RC=$?
+
+          curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "$(jq -nc --arg chat_id "${ADMIN_TELEGRAM_CHAT_ID}" --arg text "${MESSAGE}" '{chat_id:$chat_id,text:$text}')" "https://api.telegram.org/bot${ADMIN_TELEGRAM_BOT_TOKEN}/sendMessage" >/dev/null || ADMIN_RC=$?
+
+          if [ "${CLIENT_RC}" -ne 0 ] || [ "${ADMIN_RC}" -ne 0 ]; then
+            echo "::warning::Bilky succeeded, but Telegram delivery failed: client_rc=${CLIENT_RC}, admin_rc=${ADMIN_RC}"
+          fi
+
+          exit 0
 
       - name: Upload diagnostics
         if: always()
